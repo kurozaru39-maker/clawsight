@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>ClawSight Engine</title>
+    <style>
+        * { box-sizing: border-box; touch-action: manipulation; }
+        body {
+            margin: 0; padding: 0;
+            background-color: #121212; color: #00ffcc;
+            font-family: sans-serif; overflow: hidden;
+            display: flex; flex-direction: column; align-items: center;
+        }
+        #ui-panel {
+            position: absolute; top: 10px; left: 10px; z-index: 100;
+            background: rgba(0, 0, 0, 0.85); padding: 12px;
+            border: 1px solid #00ffcc; border-radius: 8px; width: 280px;
+        }
+        h1 { font-size: 14px; margin: 0 0 4px 0; color: #00ffcc; text-transform: uppercase; }
+        p { font-size: 11px; margin: 0 0 8px 0; color: #aaa; line-height: 1.2; }
+        .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+        button {
+            background: #00ffcc; color: #000; border: none;
+            padding: 10px 6px; font-size: 11px; font-weight: bold;
+            border-radius: 4px; cursor: pointer;
+        }
+        button:active { background: #00b38f; }
+        button.reset { background: #ff3366; color: #fff; grid-column: span 2; }
+        #status { font-size: 12px; font-weight: bold; color: #00ffcc; margin-top: 8px; text-align: center; }
+        canvas { display: block; width: 100vw; height: 100vh; }
+    </style>
+</head>
+<body>
+
+    <div id="ui-panel">
+        <h1>ClawSight Engine</h1>
+        <p>真上視点（自作物理エンジン版）<br>青緑＝軽い / 赤＝重い(重心) / 灰＝バー</p>
+        <div class="btn-grid">
+            <button onclick="applyArmForce(-70, -30, 1.5, 2.0)">左奥を引く</button>
+            <button onclick="applyArmForce(70, -30, -1.5, 2.0)">右奥を引く</button>
+            <button onclick="applyArmForce(0, 0, 0, -3.5)">中央を押す</button>
+            <button onclick="applyArmForce(70, 30, -2.0, 2.5)">右手前を引く</button>
+            <button class="reset" onclick="resetGame()">リセット</button>
+        </div>
+        <div id="status">Status: バーの上 (ON BARS)</div>
+    </div>
+
+    <canvas id="simCanvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d');
+
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+
+        // --- 物理パラメータ ---
+        const barGap = 130;
+        const barWidth = 16;
+        const barLength = 400;
+
+        let box = {
+            x: 0, y: 0,
+            vx: 0, vy: 0,
+            angle: 0,       // 角度 (rad)
+            angularVel: 0, // 角速度
+            width: 180,
+            height: 90,
+            // 重心オフセット (右下に偏らせる)
+            comX: 35,
+            comY: 10,
+            isFallen: false
+        };
+
+        function resetGame() {
+            box.x = window.innerWidth / 2;
+            box.y = window.innerHeight / 2;
+            box.vx = 0; box.vy = 0;
+            box.angle = 0; box.angularVel = 0;
+            box.isFallen = false;
+
+            const statusEl = document.getElementById('status');
+            statusEl.innerText = "Status: バーの上 (ON BARS)";
+            statusEl.style.color = "#00ffcc";
+        }
+
+        // アームで力を加える（トルクと推進力の計算）
+        function applyArmForce(localX, localY, forceX, forceY) {
+            if (box.isFallen) return;
+
+            // ローカル座標から回転を考慮したワールドベクトルを計算
+            const cos = Math.cos(box.angle);
+            const sin = Math.sin(box.angle);
+
+            // 重心からの相対位置
+            const rx = (localX - box.comX) * cos - (localY - box.comY) * sin;
+            const ry = (localX - box.comX) * sin + (localY - box.comY) * cos;
+
+            // 加える力の方向
+            const fx = forceX * cos - forceY * sin;
+            const fy = forceX * sin + forceY * cos;
+
+            // トルク (回転力) = r x F
+            const torque = rx * fy - ry * fx;
+
+            // 物理運動の更新
+            box.angularVel += torque * 0.0008; // 慣性モーメントの擬似計算
+            box.vx += fx * 0.8;
+            box.vy += fy * 0.8;
+        }
+
+        // メイン物理ルーチン (毎フレーム実行)
+        function updatePhysics() {
+            if (box.isFallen) return;
+
+            // 位置と角度の更新
+            box.x += box.vx;
+            box.y += box.vy;
+            box.angle += box.angularVel;
+
+            // 摩擦（減衰）
+            box.vx *= 0.88;
+            box.vy *= 0.88;
+            box.angularVel *= 0.85;
+
+            // 落下・ハマり判定 (バー幅と箱の傾き・幅の関係)
+            const cx = window.innerWidth / 2;
+            const leftBarX = cx - barGap / 2;
+            const rightBarX = cx + barGap / 2;
+
+            // 傾きに応じた横幅の計算
+            const absCos = Math.abs(Math.cos(box.angle));
+            const absSin = Math.abs(Math.sin(box.angle));
+            const effectiveWidth = box.width * absCos + box.height * absSin;
+
+            // 重心がバーの間から外れたり、有効幅がバーの隙間を下回ったら落下
+            if (effectiveWidth < barGap + 12 || Math.abs(box.x - cx) > barGap) {
+                box.isFallen = true;
+                const statusEl = document.getElementById('status');
+                statusEl.innerText = "Status: 落下・斜めハマり！";
+                statusEl.style.color = "#ff0055";
+            }
+        }
+
+        // 描画ルーチン
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            const cx = canvas.width / 2;
+            const cy = canvas.height / 2;
+
+            // 1. バー2本を描画
+            ctx.fillStyle = '#555555';
+            ctx.fillRect(cx - barGap/2 - barWidth/2, cy - barLength/2, barWidth, barLength);
+            ctx.fillRect(cx + barGap/2 - barWidth/2, cy - barLength/2, barWidth, barLength);
+
+            // 2. 箱を描画 (回転マトリクス)
+            ctx.save();
+            ctx.translate(box.x, box.y);
+            ctx.rotate(box.angle);
+
+            if (box.isFallen) {
+                ctx.globalAlpha = 0.5; // 落ちたら半透明
+                ctx.scale(0.8, 0.8);  // 奥に沈む演出
+            }
+
+            // 箱本体 (青緑)
+            ctx.fillStyle = '#00ffcc';
+            ctx.fillRect(-box.width/2, -box.height/2, box.width, box.height);
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(-box.width/2, -box.height/2, box.width, box.height);
+
+            // 重心エリア (赤色で可視化)
+            ctx.fillStyle = '#ff0055';
+            ctx.beginPath();
+            ctx.arc(box.comX, box.comY, 14, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.restore();
+
+            updatePhysics();
+            requestAnimationFrame(draw);
+        }
+
+        // 初期化 & 開始
+        resetGame();
+        draw();
+    </script>
+</body>
+</html>
