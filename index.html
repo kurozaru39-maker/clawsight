@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>ClawSight - Ultimate Engine</title>
+    <style>
+        * { box-sizing: border-box; touch-action: none; }
+        body { margin: 0; overflow: hidden; background-color: #0d0d0d; font-family: sans-serif; }
+        
+        #ui-panel {
+            position: absolute; top: 10px; left: 10px; right: 10px; z-index: 100;
+            background: rgba(0, 0, 0, 0.85); padding: 12px;
+            border: 1px solid #00ffcc; border-radius: 12px; color: #00ffcc;
+        }
+        h1 { font-size: 15px; margin: 0 0 6px 0; text-transform: uppercase; text-align: center; }
+        
+        .mode-select { margin-bottom: 8px; width: 100%; }
+        select { 
+            width: 100%; padding: 8px; background: #222; color: #00ffcc; 
+            border: 1px solid #00ffcc; border-radius: 4px; font-size: 12px; font-weight: bold;
+        }
+        #status { font-size: 13px; font-weight: bold; color: #00ffcc; margin-top: 4px; text-align: center; }
+        
+        #controls {
+            position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%);
+            z-index: 100; width: 90%; max-width: 400px;
+            display: flex; gap: 10px; justify-content: space-between;
+        }
+        button {
+            flex: 1; padding: 16px 0; font-size: 16px; font-weight: 900;
+            border: none; border-radius: 8px; cursor: pointer;
+            box-shadow: 0 4px 0 rgba(0,0,0,0.5); transition: transform 0.1s;
+        }
+        button:active { transform: translateY(4px); box-shadow: none; }
+        #btn-drop { background: #ff3366; color: #fff; border: 2px solid #ff88aa; }
+        #btn-reset { background: #333; color: #00ffcc; border: 2px solid #00ffcc; flex: 0.5; }
+
+        #target-ui {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: rgba(255, 255, 255, 0.4); font-size: 12px; font-weight: bold; pointer-events: none; z-index: 50;
+            text-align: center; text-shadow: 1px 1px 2px #000;
+        }
+        #loading {
+            position: absolute; top: 0; left: 0; width: 100vw; height: 100vh;
+            background: #0d0d0d; color: #00ffcc; display: flex; flex-direction: column;
+            justify-content: center; align-items: center; font-size: 16px; font-weight: bold; z-index: 1000;
+            gap: 10px;
+        }
+    </style>
+    <!-- Three.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <div id="loading">
+        <div>WASM物理エンジン 読み込み中...</div>
+        <div style="font-size: 11px; color: #888;">iPhone最適化ビルド</div>
+    </div>
+
+    <div id="ui-panel">
+        <h1>ClawSight 3D [Ultimate WASM]</h1>
+        <div class="mode-select">
+            <select id="bridgeMode" onchange="initStage()">
+                <option value="parallel_h">設定1：平行・横向き</option>
+                <option value="parallel_v">設定2：直線・縦向き</option>
+                <option value="suehirogari">設定3：末広がり（右側が広い）</option>
+            </select>
+        </div>
+        <div id="status">Status: 物理演算稼働中</div>
+    </div>
+
+    <div id="target-ui">[ スワイプで移動 ]</div>
+
+    <div id="controls">
+        <button id="btn-reset" onclick="initStage()">RESET</button>
+        <button id="btn-drop" onclick="dropArm()">DROP ARM</button>
+    </div>
+
+    <script type="module">
+        import RAPIER from 'https://esm.sh/@dimforge/rapier3d-compat';
+
+        let world, rapier = RAPIER;
+        let scene, camera, renderer;
+        let boxBody, boxMesh, comMarker;
+        let bars = [], barMeshes = [];
+        let isFallen = false;
+        let targetMesh;
+
+        async function init() {
+            // 1. WASMモジュールの非同期初期化
+            await rapier.init();
+            
+            // ローディング画面除去
+            document.getElementById('loading').style.display = 'none';
+
+            // 2. Three.js セットアップ
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(0, 16, 10);
+            camera.lookAt(0, -2, 0);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(5, 15, 5);
+            scene.add(dirLight);
+
+            // 3. Rapier 物理ワールド構築
+            const gravity = { x: 0.0, y: -14.0, z: 0.0 };
+            world = new rapier.World(gravity);
+
+            // 4. エイムターゲット作成
+            const targetGeo = new THREE.RingGeometry(0.5, 0.7, 16);
+            const targetMat = new THREE.MeshBasicMaterial({ color: 0xff3366, side: THREE.DoubleSide });
+            targetMesh = new THREE.Mesh(targetGeo, targetMat);
+            targetMesh.rotation.x = -Math.PI / 2;
+            targetMesh.position.set(0, 1.5, 0);
+            scene.add(targetMesh);
+
+            // グローバルに関数を公開
+            window.initStage = initStage;
+            window.dropArm = dropArm;
+
+            initStage();
+            initInput();
+            animate();
+        }
+
+        function clearStage() {
+            bars.forEach(b => world.removeRigidBody(b));
+            barMeshes.forEach(m => scene.remove(m));
+            bars = []; barMeshes = [];
+            if (boxBody) {
+                world.removeRigidBody(boxBody);
+                scene.remove(boxMesh);
+                boxBody = null;
+            }
+        }
+
+        function createBar(x, z, rotY = 0) {
+            const bodyDesc = rapier.RigidBodyDesc.fixed()
+                .setTranslation(x, -0.5, z)
+                .setRotation({x: 0, y: Math.sin(rotY/2), z: 0, w: Math.cos(rotY/2)});
+            const body = world.createRigidBody(bodyDesc);
+            
+            const colliderDesc = rapier.ColliderDesc.cuboid(10.0, 0.3, 0.3)
+                .setFriction(0.95)
+                .setRestitution(0.0);
+            world.createCollider(colliderDesc, body);
+            bars.push(body);
+
+            const geo = new THREE.BoxGeometry(20, 0.6, 0.6);
+            const mat = new THREE.MeshLambertMaterial({ color: 0x666666 });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(x, -0.5, z);
+            mesh.rotation.y = rotY;
+            scene.add(mesh);
+            barMeshes.push(mesh);
+        }
+
+        function initStage() {
+            if (!world) return;
+            clearStage();
+            isFallen = false;
+            document.getElementById('status').innerText = "Status: プレイ中... 重心を探れ！";
+            document.getElementById('status').style.color = "#00ffcc";
+
+            const mode = document.getElementById('bridgeMode').value;
+            const gap = 1.6;
+
+            if (mode === 'parallel_h') {
+                createBar(0, -gap);
+                createBar(0, gap);
+            } else if (mode === 'parallel_v') {
+                createBar(-gap, 0, Math.PI/2);
+                createBar(gap, 0, Math.PI/2);
+            } else if (mode === 'suehirogari') {
+                createBar(0, -gap, -0.08);
+                createBar(0, gap, 0.08);
+            }
+
+            // 重心のランダム化
+            const comX = (Math.random() - 0.5) * 1.2;
+            const comZ = (Math.random() - 0.5) * 1.2;
+
+            // 動的剛体 ＋ CCD有効化
+            const bodyDesc = rapier.RigidBodyDesc.dynamic()
+                .setTranslation(0.0, 4.0, 0.0)
+                .setCcdEnabled(true);
+            boxBody = world.createRigidBody(bodyDesc);
+
+            const colliderDesc = rapier.ColliderDesc.cuboid(1.6, 0.75, 0.75)
+                .setDensity(1.2)
+                .setFriction(0.85)
+                .setRestitution(0.0)
+                .setTranslation({ x: comX, y: -0.2, z: comZ });
+            world.createCollider(colliderDesc, boxBody);
+
+            const geo = new THREE.BoxGeometry(3.2, 1.5, 1.5);
+            const mat = new THREE.MeshLambertMaterial({ color: 0x00ffcc, transparent: true, opacity: 1.0 });
+            boxMesh = new THREE.Mesh(geo, mat);
+            
+            const edges = new THREE.EdgesGeometry(geo);
+            const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x000000 }));
+            boxMesh.add(line);
+
+            const comGeo = new THREE.SphereGeometry(0.3, 16, 16);
+            const comMat = new THREE.MeshBasicMaterial({ color: 0xff0055 });
+            comMarker = new THREE.Mesh(comGeo, comMat);
+            comMarker.position.set(comX, -0.2, comZ);
+            comMarker.visible = false;
+            boxMesh.add(comMarker);
+
+            scene.add(boxMesh);
+        }
+
+        function initInput() {
+            const raycaster = new THREE.Raycaster();
+            const mouse = new THREE.Vector2();
+            const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -1.5);
+
+            function updateTarget(event) {
+                if(event.target.tagName === 'BUTTON' || event.target.tagName === 'SELECT') return;
+                let clientX = event.touches ? event.touches[0].clientX : event.clientX;
+                let clientY = event.touches ? event.touches[0].clientY : event.clientY;
+                
+                mouse.x = (clientX / window.innerWidth) * 2 - 1;
+                mouse.y = -(clientY / window.innerHeight) * 2 + 1;
+                
+                raycaster.setFromCamera(mouse, camera);
+                const targetPos = new THREE.Vector3();
+                raycaster.ray.intersectPlane(plane, targetPos);
+                
+                if (targetPos) {
+                    targetPos.x = Math.max(-5, Math.min(5, targetPos.x));
+                    targetPos.z = Math.max(-5, Math.min(5, targetPos.z));
+                    targetMesh.position.set(targetPos.x, 1.5, targetPos.z);
+                }
+            }
+            window.addEventListener('touchmove', updateTarget, {passive: false});
+            window.addEventListener('mousemove', updateTarget);
+        }
+
+        function dropArm() {
+            if (!boxBody || isFallen) return;
+            const pos = boxBody.translation();
+            const tx = targetMesh.position.x;
+            const tz = targetMesh.position.z;
+            
+            const dx = tx - pos.x;
+            const dz = tz - pos.z;
+            if (Math.sqrt(dx*dx + dz*dz) > 2.5) return;
+
+            const impulse = { x: 0.0, y: 16.0, z: 0.0 };
+            const rotPoint = { x: tx, y: pos.y, z: tz };
+            boxBody.applyImpulseAtPoint(impulse, rotPoint, true);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if (!world) return;
+
+            world.step();
+
+            if (boxBody && boxMesh) {
+                const pos = boxBody.translation();
+                const rot = boxBody.rotation();
+                boxMesh.position.set(pos.x, pos.y, pos.z);
+                boxMesh.quaternion.set(rot.x, rot.y, rot.z, rot.w);
+
+                if (!isFallen && pos.y < -4.0) {
+                    isFallen = true;
+                    boxMesh.material.opacity = 0.4;
+                    comMarker.visible = true;
+                    document.getElementById('status').innerText = "🎉 落下成功！重心はここだった！";
+                    document.getElementById('status').style.color = "#ff3366";
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            if (!renderer) return;
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        init();
+    </script>
+</body>
+</html>
