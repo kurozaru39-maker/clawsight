@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>ClawSight v4.0 - Deterministic AI Core</title>
+    <style>
+        * { box-sizing: border-box; touch-action: none; }
+        body { margin: 0; overflow: hidden; background-color: #0b0b0b; font-family: sans-serif; }
+        
+        #ui-panel {
+            position: absolute; top: 10px; left: 10px; right: 10px; z-index: 100;
+            background: rgba(0, 0, 0, 0.9); padding: 14px;
+            border: 1px solid #00ffcc; border-radius: 12px; color: #00ffcc;
+            text-align: center;
+        }
+        h1 { font-size: 15px; margin: 0 0 4px 0; text-transform: uppercase; letter-spacing: 1px; }
+        p { font-size: 11px; margin: 0; color: #aaa; }
+        #status { font-size: 13px; font-weight: bold; color: #00ffcc; margin-top: 6px; }
+        
+        #controls {
+            position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%);
+            z-index: 100; width: 90%; max-width: 400px;
+            display: flex; gap: 10px; justify-content: space-between;
+        }
+        button {
+            flex: 1; padding: 16px 0; font-size: 15px; font-weight: 900;
+            border: none; border-radius: 8px; cursor: pointer;
+            box-shadow: 0 4px 0 rgba(0,0,0,0.6);
+        }
+        button:active { transform: translateY(4px); box-shadow: none; }
+        #btn-drop { background: #ff3366; color: #fff; border: 2px solid #ff88aa; }
+        #btn-ai-nav { background: #00ffcc; color: #000; border: 2px solid #88ffeb; }
+        #btn-reset { background: #222; color: #00ffcc; border: 2px solid #00ffcc; flex: 0.5; }
+
+        #target-ui {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: rgba(255, 255, 255, 0.4); font-size: 12px; font-weight: bold; pointer-events: none; z-index: 50;
+            text-align: center; text-shadow: 1px 1px 2px #000;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <div id="ui-panel">
+        <h1>ClawSight v4.0 [Deterministic Core]</h1>
+        <p>物理演算を追放した数学的決定論エンジン ＆ AIナビ</p>
+        <div id="status">Status: アーム位置を定めろ！</div>
+    </div>
+
+    <div id="target-ui">[ スワイプでアーム位置を移動 ]</div>
+
+    <div id="controls">
+        <button id="btn-reset" onclick="resetSimulation()">RESET</button>
+        <button id="btn-ai-nav" onclick="computeAINav()">AI NAVI</button>
+        <button id="btn-drop" onclick="dropArm()">ACTION</button>
+    </div>
+
+    <script>
+        // --- 1. シーン・カメラ・レンダラー ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0b0b0b);
+
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 14, 16);
+        camera.lookAt(0, -1, 0);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        document.body.appendChild(renderer.domElement);
+
+        scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
+        dirLight.position.set(10, 20, 10);
+        scene.add(dirLight);
+
+        // --- 2. 決定論的ゲームステート ---
+        let boxGroup;
+        let targetMesh, aiGhostMesh;
+        
+        let state = {
+            x: 0, z: 0,       // 箱の中心座標
+            rotX: 0, rotZ: 0, // 傾き角
+            comX: 0, comZ: 0, // 隠された重心の偏り
+            isAnimating: false,
+            isFallen: false
+        };
+
+        // 平行バーの描画
+        function buildStage() {
+            const barMat = new THREE.MeshStandardMaterial({ color: 0x777777, roughness: 0.3 });
+            const bar1 = new THREE.Mesh(new THREE.BoxGeometry(16, 0.5, 0.5), barMat);
+            bar1.position.set(0, 0, -2.0);
+            scene.add(bar1);
+            const bar2 = new THREE.Mesh(new THREE.BoxGeometry(16, 0.5, 0.5), barMat);
+            bar2.position.set(0, 0, 2.0);
+            scene.add(bar2);
+        }
+
+        function initBox() {
+            if (boxGroup) scene.remove(boxGroup);
+
+            state.x = 0;
+            state.z = 0;
+            state.rotX = 0;
+            state.rotZ = 0;
+            state.isAnimating = false;
+            state.isFallen = false;
+
+            // 重心のランダムな偏り（前後左右どちらかに必ずズレる）
+            state.comX = (Math.random() - 0.5) * 1.2;
+            state.comZ = (Math.random() - 0.5) * 1.2;
+
+            document.getElementById('status').innerText = "Status: アーム位置を定めろ！";
+            document.getElementById('status').style.color = "#00ffcc";
+
+            boxGroup = new THREE.Group();
+            
+            const boxGeo = new THREE.BoxGeometry(3.0, 1.4, 3.0);
+            const boxMat = new THREE.MeshStandardMaterial({ color: 0x00ffcc, roughness: 0.3, transparent: true, opacity: 1.0 });
+            const mainMesh = new THREE.Mesh(boxGeo, boxMat);
+            boxGroup.add(mainMesh);
+
+            const edges = new THREE.EdgesGeometry(boxGeo);
+            const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x000000 }));
+            boxGroup.add(line);
+
+            // 答え合わせ用の重心マーカー
+            const comGeo = new THREE.SphereGeometry(0.3, 16, 16);
+            const comMat = new THREE.MeshBasicMaterial({ color: 0xff0055 });
+            const comMarker = new THREE.Mesh(comGeo, comMat);
+            comMarker.name = "comMarker";
+            comMarker.position.set(state.comX, 0, state.comZ);
+            comMarker.visible = false;
+            boxGroup.add(comMarker);
+
+            boxGroup.position.set(state.x, 0.75, state.z);
+            scene.add(boxGroup);
+
+            if (aiGhostMesh) aiGhostMesh.visible = false;
+        }
+
+        function resetSimulation() {
+            initBox();
+        }
+
+        // --- 3. ユーザー入力（ターゲット移動） ---
+        const targetGeo = new THREE.RingGeometry(0.4, 0.6, 16);
+        const targetMat = new THREE.MeshBasicMaterial({ color: 0xff3366, side: THREE.DoubleSide });
+        targetMesh = new THREE.Mesh(targetGeo, targetMat);
+        targetMesh.rotation.x = -Math.PI / 2;
+        targetMesh.position.set(0, 0, 0);
+        scene.add(targetMesh);
+
+        // AIナビ用のゴーストターゲット（緑のリング）
+        const ghostGeo = new THREE.RingGeometry(0.4, 0.6, 16);
+        const ghostMat = new THREE.MeshBasicMaterial({ color: 0x00ffcc, side: THREE.DoubleSide, transparent: true, opacity: 0.8 });
+        aiGhostMesh = new THREE.Mesh(ghostGeo, ghostMat);
+        aiGhostMesh.rotation.x = -Math.PI / 2;
+        aiGhostMesh.visible = false;
+        scene.add(aiGhostMesh);
+
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+
+        function updateTarget(event) {
+            if(event.target.tagName === 'BUTTON') return;
+            let clientX = event.touches ? event.touches[0].clientX : event.clientX;
+            let clientY = event.touches ? event.touches[0].clientY : event.clientY;
+            
+            mouse.x = (clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(clientY / window.innerHeight) * 2 + 1;
+            
+            raycaster.setFromCamera(mouse, camera);
+            const targetPos = new THREE.Vector3();
+            raycaster.ray.intersectPlane(plane, targetPos);
+            
+            if (targetPos) {
+                targetMesh.position.x = Math.max(-4, Math.min(4, targetPos.x));
+                targetMesh.position.z = Math.max(-4, Math.min(4, targetPos.z));
+            }
+        }
+        window.addEventListener('touchmove', updateTarget, {passive: false});
+        window.addEventListener('mousemove', updateTarget);
+
+        // --- 4. 【AIナビモード】最適解の逆算アルゴリズム ---
+        function computeAINav() {
+            if (state.isFallen) return;
+
+            // AIは「隠された重心の逆側」を叩くことで、最も効率よく箱を斜めにできることを知っている
+            // 重心(comX, comZ)の反対側のエッジ付近を最適解として算出
+            const bestX = state.x - state.comX * 0.8;
+            const bestZ = state.z - state.comZ * 0.8;
+
+            aiGhostMesh.position.set(bestX, 0.05, bestZ);
+            aiGhostMesh.visible = true;
+
+            document.getElementById('status').innerText = "🤖 AI NAVI: 緑のリングの位置を狙え！";
+            document.getElementById('status').style.color = "#00ffcc";
+        }
+
+        // --- 5. 決定論的アクション（すり抜けゼロの数学的遷移） ---
+        function dropArm() {
+            if (state.isAnimating || state.isFallen) return;
+
+            const tx = targetMesh.position.x;
+            const tz = targetMesh.position.z;
+
+            const dx = tx - state.x;
+            const dz = tz - state.z;
+            if (Math.sqrt(dx*dx + dz*dz) > 2.8) return; // 空振り
+
+            state.isAnimating = true;
+            document.getElementById('status').innerText = "Status: アーム動作中...";
+
+            // 【数学的決定論の核心】
+            // 叩いた位置(tx, tz)と重心(state.comX, state.comZ)の関係から、
+            // 「どちらに何ミリ動き、何度傾くか」を瞬時に方程式で決定する
+            const leverageX = tx - (state.x + state.comX);
+            const leverageZ = tz - (state.z + state.comZ);
+
+            const targetX = state.x + leverageX * 0.4;
+            const targetZ = state.z + leverageZ * 0.4;
+            const targetRotX = leverageZ * 0.35;
+            const targetRotZ = -leverageX * 0.35;
+
+            // スムーズなイージングで状態をターゲットへ遷移させる（破綻ゼロ）
+            let progress = 0;
+            const animateStep = () => {
+                progress += 0.06;
+                if (progress < 1.0) {
+                    state.x += (targetX - state.x) * 0.2;
+                    state.z += (targetZ - state.z) * 0.2;
+                    state.rotX += (targetRotX - state.rotX) * 0.2;
+                    state.rotZ += (targetRotZ - state.rotZ) * 0.2;
+
+                    boxGroup.position.set(state.x, 0.75, state.z);
+                    boxGroup.rotation.set(state.rotX, 0, state.rotZ);
+                    requestAnimationFrame(animateStep);
+                } else {
+                    // 遷移完了後、バーの隙間（Parallel Gap: Z軸方向 0.8 ~ 2.2）に落ちているか判定
+                    const distZ = Math.abs(state.z);
+                    const isDropped = (distZ < 0.8 || distZ > 2.2 || Math.abs(state.rotX) > 0.25 || Math.abs(state.rotZ) > 0.25);
+
+                    if (isDropped && (Math.abs(state.z) > 1.8 || Math.abs(state.rotX) > 0.25)) {
+                        triggerFall();
+                    } else {
+                        state.isAnimating = false;
+                        document.getElementById('status').innerText = "Status: 決まらず！ 次の手を考えろ";
+                    }
+                }
+            };
+            animateStep();
+        }
+
+        // --- 6. 落下＆リザルト演出 ---
+        function triggerFall() {
+            state.isFallen = true;
+            document.getElementById('status').innerText = "🎉 攻略成功！ 重心解析完了！";
+            document.getElementById('status').style.color = "#ff3366";
+
+            let fallProgress = 0;
+            const fallAnim = () => {
+                fallProgress += 0.05;
+                state.y = 0.75 - fallProgress * 2.5;
+                boxGroup.position.y = state.y;
+                boxGroup.rotation.x += 0.05;
+
+                if (fallProgress < 1.0) {
+                    requestAnimationFrame(fallAnim);
+                } else {
+                    boxGroup.children[0].material.opacity = 0.4;
+                    const com = boxGroup.getObjectByName("comMarker");
+                    if (com) com.visible = true; // 重心公開
+                }
+            };
+            fallAnim();
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // 起動
+        buildStage();
+        initBox();
+        animate();
+    </script>
+</body>
+</html>
