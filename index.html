@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>ClawSight 3D Prototype</title>
+    <style>
+        * { box-sizing: border-box; touch-action: manipulation; }
+        body { margin: 0; overflow: hidden; background-color: #121212; font-family: sans-serif; }
+        
+        #ui-panel {
+            position: absolute; top: 10px; left: 10px; right: 10px; z-index: 100;
+            background: rgba(0, 0, 0, 0.7); padding: 12px;
+            border: 1px solid #00ffcc; border-radius: 8px; color: #00ffcc;
+        }
+        h1 { font-size: 14px; margin: 0 0 4px 0; text-transform: uppercase; }
+        p { font-size: 11px; margin: 0 0 8px 0; color: #aaa; }
+        
+        .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+        button {
+            background: #00ffcc; color: #000; border: none;
+            padding: 12px 6px; font-size: 12px; font-weight: bold;
+            border-radius: 4px; cursor: pointer;
+        }
+        button:active { background: #00b38f; }
+        button.reset { background: #ff3366; color: #fff; grid-column: span 2; }
+    </style>
+    <!-- 3Dエンジンと物理エンジンの読み込み -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cannon.js/0.6.2/cannon.min.js"></script>
+</head>
+<body>
+
+    <div id="ui-panel">
+        <h1>ClawSight 3D - Kata-Ochi</h1>
+        <p>3D物理演算テスト。斜め視点から片落ちの挙動を確認しろ！</p>
+        <div class="btn-grid">
+            <button onclick="applyImpulse(-2, 0, 2)">左奥を持ち上げる</button>
+            <button onclick="applyImpulse(2, 0, 2)">右奥を持ち上げる</button>
+            <button onclick="applyImpulse(-2, 0, -2)">左手前を持ち上げる</button>
+            <button onclick="applyImpulse(2, 0, -2)">右手前を持ち上げる</button>
+            <button class="reset" onclick="resetGame()">箱を再セット</button>
+        </div>
+    </div>
+
+    <script>
+        // --- 1. Three.js (描画) & Cannon.js (物理) の初期化 ---
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+        // 斜め上からの見下ろし視点（アイソメトリック風）
+        camera.position.set(0, 15, 15);
+        camera.lookAt(0, 0, 0);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // ライトの追加（立体感を出す）
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        scene.add(ambientLight);
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        directionalLight.position.set(5, 10, 5);
+        scene.add(directionalLight);
+
+        // 物理ワールドの構築
+        const world = new CANNON.World();
+        world.gravity.set(0, -9.82, 0); // 地球の重力
+        world.broadphase = new CANNON.NaiveBroadphase();
+        world.solver.iterations = 20;
+
+        // --- 2. マテリアル（摩擦・反発）の設定 ---
+        const barMaterial = new CANNON.Material("bar");
+        const boxMaterial = new CANNON.Material("box");
+        const contactMaterial = new CANNON.ContactMaterial(barMaterial, boxMaterial, {
+            friction: 0.4,     // 滑りやすさ（実機に合わせて調整可能）
+            restitution: 0.1   // 反発（跳ね返り）
+        });
+        world.addContactMaterial(contactMaterial);
+
+        // --- 3. バー（橋渡し）の生成 ---
+        const bars = [];
+        const barMeshes = [];
+        const barGap = 2.8; // バーの隙間
+
+        function createBar(x, z) {
+            const shape = new CANNON.Box(new CANNON.Vec3(10, 0.2, 0.2)); // 横長のバー
+            const body = new CANNON.Body({ mass: 0, material: barMaterial }); // mass 0 は動かない固定オブジェクト
+            body.position.set(x, 0, z);
+            world.addBody(body);
+            bars.push(body);
+
+            const geo = new THREE.BoxGeometry(20, 0.4, 0.4);
+            const mat = new THREE.MeshLambertMaterial({ color: 0x888888 });
+            const mesh = new THREE.Mesh(geo, mat);
+            scene.add(mesh);
+            barMeshes.push(mesh);
+        }
+        createBar(0, -barGap / 2); // 奥のバー
+        createBar(0, barGap / 2);  // 手前のバー
+
+        // --- 4. 箱（ターゲット）の生成 ---
+        let boxBody, boxMesh;
+        const boxSize = { w: 3.2, h: 1.5, d: 1.5 }; // 幅, 高さ, 奥行き
+
+        function initBox() {
+            if (boxBody) { world.removeBody(boxBody); scene.remove(boxMesh); }
+
+            // 物理の箱（質量と重心のズレを設定）
+            boxBody = new CANNON.Body({ mass: 1, material: boxMaterial });
+            const shape = new CANNON.Box(new CANNON.Vec3(boxSize.w/2, boxSize.h/2, boxSize.d/2));
+            
+            // 【ハックポイント】重心をオフセットする (x, y, z)
+            // 中心から右奥に少し重心をズラすことで、不規則な落ち方をする
+            boxBody.addShape(shape, new CANNON.Vec3(0.5, -0.2, -0.5)); 
+            
+            boxBody.position.set(0, 3, 0); // 上空から落とす
+            world.addBody(boxBody);
+
+            // 描画用の箱
+            const geo = new THREE.BoxGeometry(boxSize.w, boxSize.h, boxSize.d);
+            const mat = new THREE.MeshLambertMaterial({ color: 0x00ffcc });
+            boxMesh = new THREE.Mesh(geo, mat);
+            scene.add(boxMesh);
+        }
+
+        // --- 5. アーム操作（力を加える） ---
+        window.applyImpulse = function(x, y, z) {
+            // アームで「角を上へ引っ張り上げる」ような力を擬似的に加える
+            const worldPoint = new CANNON.Vec3(
+                boxBody.position.x + x, 
+                boxBody.position.y + y, 
+                boxBody.position.z + z
+            );
+            const force = new CANNON.Vec3(0, 6, 0); // 上向きの力
+            boxBody.applyImpulse(force, worldPoint);
+        };
+
+        window.resetGame = function() {
+            initBox();
+        };
+
+        // --- 6. アニメーションループ ---
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            // 物理エンジンの時間を進める
+            world.step(1 / 60);
+
+            // 物理演算の結果を描画（Three.js）に同期させる
+            if (boxBody && boxMesh) {
+                boxMesh.position.copy(boxBody.position);
+                boxMesh.quaternion.copy(boxBody.quaternion);
+            }
+
+            // バーの同期
+            for(let i=0; i<bars.length; i++) {
+                barMeshes[i].position.copy(bars[i].position);
+                barMeshes[i].quaternion.copy(bars[i].quaternion);
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // 画面リサイズ対応
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // 起動
+        initBox();
+        animate();
+    </script>
+</body>
+</html>
