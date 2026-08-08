@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>ClawSight v4.2 - Indicator Master</title>
+    <style>
+        * { box-sizing: border-box; touch-action: none; }
+        body { margin: 0; overflow: hidden; background-color: #0b0b0b; font-family: sans-serif; }
+        
+        #ui-panel {
+            position: absolute; top: 10px; left: 10px; right: 10px; z-index: 100;
+            background: rgba(0, 0, 0, 0.9); padding: 12px;
+            border: 1px solid #00ffcc; border-radius: 12px; color: #00ffcc;
+            text-align: center;
+        }
+        h1 { font-size: 14px; margin: 0 0 2px 0; text-transform: uppercase; letter-spacing: 1px; }
+        #indicator-text { font-size: 12px; font-weight: bold; color: #ff3366; margin: 2px 0; }
+        #status { font-size: 12px; font-weight: bold; color: #00ffcc; margin-top: 4px; }
+        
+        #controls {
+            position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%);
+            z-index: 100; width: 90%; max-width: 400px;
+            display: flex; gap: 10px; justify-content: space-between;
+        }
+        button {
+            flex: 1; padding: 15px 0; font-size: 15px; font-weight: 900;
+            border: none; border-radius: 8px; cursor: pointer;
+            box-shadow: 0 4px 0 rgba(0,0,0,0.6);
+        }
+        button:active { transform: translateY(4px); box-shadow: none; }
+        #btn-drop { background: #ff3366; color: #fff; border: 2px solid #ff88aa; }
+        #btn-ai-nav { background: #00ffcc; color: #000; border: 2px solid #88ffeb; }
+        #btn-reset { background: #222; color: #00ffcc; border: 2px solid #00ffcc; flex: 0.5; }
+
+        #target-ui {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: rgba(255, 255, 255, 0.4); font-size: 11px; font-weight: bold; pointer-events: none; z-index: 50;
+            text-align: center; text-shadow: 1px 1px 2px #000;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <div id="ui-panel">
+        <h1>ClawSight v4.2 [Indicator HUD]</h1>
+        <div id="indicator-text">TARGET: [ 狙い定め中... ]</div>
+        <div id="status">Status: アーム位置を定めろ！</div>
+    </div>
+
+    <div id="target-ui">[ スワイプで移動 ]</div>
+
+    <div id="controls">
+        <button id="btn-reset" onclick="resetSimulation()">RESET</button>
+        <button id="btn-ai-nav" onclick="computeAINav()">AI NAVI</button>
+        <button id="btn-drop" onclick="dropArm()">ACTION</button>
+    </div>
+
+    <script>
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0b0b0b);
+
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 14, 16);
+        camera.lookAt(0, -1, 0);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        document.body.appendChild(renderer.domElement);
+
+        scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
+        dirLight.position.set(10, 20, 10);
+        scene.add(dirLight);
+
+        let boxGroup;
+        let targetMesh, aiGhostMesh;
+        
+        let state = {
+            x: 0, z: 0,       
+            rotX: 0, rotZ: 0, 
+            comX: 0, comZ: 0, 
+            isAnimating: false,
+            isFallen: false
+        };
+
+        function buildStage() {
+            const barMat = new THREE.MeshStandardMaterial({ color: 0x777777, roughness: 0.3 });
+            const bar1 = new THREE.Mesh(new THREE.BoxGeometry(16, 0.5, 0.5), barMat);
+            bar1.position.set(0, 0, -1.8);
+            scene.add(bar1);
+            const bar2 = new THREE.Mesh(new THREE.BoxGeometry(16, 0.5, 0.5), barMat);
+            bar2.position.set(0, 0, 1.8);
+            scene.add(bar2);
+        }
+
+        function initBox() {
+            if (boxGroup) scene.remove(boxGroup);
+
+            state.x = 0;
+            state.z = 0;
+            state.rotX = 0;
+            state.rotZ = 0;
+            state.isAnimating = false;
+            state.isFallen = false;
+
+            state.comX = (Math.random() - 0.5) * 1.0;
+            state.comZ = (Math.random() - 0.5) * 0.8;
+
+            document.getElementById('status').innerText = "Status: アーム位置を定めろ！";
+            document.getElementById('status').style.color = "#00ffcc";
+
+            boxGroup = new THREE.Group();
+            
+            const boxGeo = new THREE.BoxGeometry(4.0, 1.2, 2.0);
+            const boxMat = new THREE.MeshStandardMaterial({ color: 0x00ffcc, roughness: 0.3, transparent: true, opacity: 1.0 });
+            const mainMesh = new THREE.Mesh(boxGeo, boxMat);
+            boxGroup.add(mainMesh);
+
+            const edges = new THREE.EdgesGeometry(boxGeo);
+            const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x000000 }));
+            boxGroup.add(line);
+
+            const comGeo = new THREE.SphereGeometry(0.25, 16, 16);
+            const comMat = new THREE.MeshBasicMaterial({ color: 0xff0055 });
+            const comMarker = new THREE.Mesh(comGeo, comMat);
+            comMarker.name = "comMarker";
+            comMarker.position.set(state.comX, 0, state.comZ);
+            comMarker.visible = false;
+            boxGroup.add(comMarker);
+
+            boxGroup.position.set(state.x, 0.6, state.z);
+            scene.add(boxGroup);
+
+            if (aiGhostMesh) aiGhostMesh.visible = false;
+        }
+
+        function resetSimulation() {
+            initBox();
+        }
+
+        // --- ターゲットリング（インジケーター連動マテリアル） ---
+        const targetGeo = new THREE.RingGeometry(0.4, 0.6, 16);
+        const targetMat = new THREE.MeshBasicMaterial({ color: 0xff3366, side: THREE.DoubleSide });
+        targetMesh = new THREE.Mesh(targetGeo, targetMat);
+        targetMesh.rotation.x = -Math.PI / 2;
+        targetMesh.position.set(0, 0, 0);
+        scene.add(targetMesh);
+
+        // AIゴースト
+        const ghostGeo = new THREE.RingGeometry(0.4, 0.6, 16);
+        const ghostMat = new THREE.MeshBasicMaterial({ color: 0x00ffcc, side: THREE.DoubleSide, transparent: true, opacity: 0.8 });
+        aiGhostMesh = new THREE.Mesh(ghostGeo, ghostMat);
+        aiGhostMesh.rotation.x = -Math.PI / 2;
+        aiGhostMesh.visible = false;
+        scene.add(aiGhostMesh);
+
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+
+        function updateTarget(event) {
+            if(event.target.tagName === 'BUTTON') return;
+            let clientX = event.touches ? event.touches[0].clientX : event.clientX;
+            let clientY = event.touches ? event.touches[0].clientY : event.clientY;
+            
+            mouse.x = (clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(clientY / window.innerHeight) * 2 + 1;
+            
+            raycaster.setFromCamera(mouse, camera);
+            const targetPos = new THREE.Vector3();
+            raycaster.ray.intersectPlane(plane, targetPos);
+            
+            if (targetPos) {
+                targetMesh.position.x = Math.max(-5, Math.min(5, targetPos.x));
+                targetMesh.position.z = Math.max(-5, Math.min(5, targetPos.z));
+
+                // 【インジケーター連動ロジック】
+                // ターゲットのZ座標が箱の中心から見て手前か奥かで色とUIテキストを切り替える
+                const dz = targetMesh.position.z - state.z;
+                const indicatorEl = document.getElementById('indicator-text');
+
+                if (dz < -0.3) {
+                    // 奥側を狙っている
+                    targetMat.color.setHex(0xff00ff); // マゼンタ（奥）
+                    indicatorEl.innerText = "🎯 狙い: [ 奥のフチ (BACK) ]";
+                    indicatorEl.style.color = "#ff00ff";
+                } else if (dz > 0.3) {
+                    // 手前側を狙っている
+                    targetMat.color.setHex(0x00ffff); // シアン（手前）
+                    indicatorEl.innerText = "🎯 狙い: [ 手前のフチ (FRONT) ]";
+                    indicatorEl.style.color = "#00ffff";
+                } else {
+                    // 中央付近
+                    targetMat.color.setHex(0xff3366); // レッド（中央）
+                    indicatorEl.innerText = "🎯 狙い: [ 箱の中心付近 (CENTER) ]";
+                    indicatorEl.style.color = "#ff3366";
+                }
+            }
+        }
+        window.addEventListener('touchmove', updateTarget, {passive: false});
+        window.addEventListener('mousemove', updateTarget);
+
+        function computeAINav() {
+            if (state.isFallen) return;
+
+            const bestX = state.x - state.comX * 0.9;
+            const bestZ = state.z - (state.z > 0 ? 1.0 : -1.0);
+
+            aiGhostMesh.position.set(bestX, 0.05, bestZ);
+            aiGhostMesh.visible = true;
+
+            document.getElementById('status').innerText = "🤖 AI NAVI: 緑のリング（推奨ポイント）を狙え！";
+            document.getElementById('status').style.color = "#00ffcc";
+        }
+
+        function dropArm() {
+            if (state.isAnimating || state.isFallen) return;
+
+            const tx = targetMesh.position.x;
+            const tz = targetMesh.position.z;
+
+            state.isAnimating = true;
+            document.getElementById('status').innerText = "Status: アーム動作・押し込み中...";
+
+            const leverageX = tx - (state.x + state.comX);
+            const leverageZ = tz - (state.z + state.comZ);
+
+            const targetX = state.x + leverageX * 0.3;
+            const targetZ = state.z + leverageZ * 0.4;
+            const targetRotX = leverageZ * 0.45;
+            const targetRotZ = -leverageX * 0.45;
+
+            let progress = 0;
+            const animateStep = () => {
+                progress += 0.07;
+                if (progress < 1.0) {
+                    state.x += (targetX - state.x) * 0.25;
+                    state.z += (targetZ - state.z) * 0.25;
+                    state.rotX += (targetRotX - state.rotX) * 0.25;
+                    state.rotZ += (targetRotZ - state.rotZ) * 0.25;
+
+                    boxGroup.position.set(state.x, 0.6, state.z);
+                    boxGroup.rotation.set(state.rotX, 0, state.rotZ);
+                    requestAnimationFrame(animateStep);
+                } else {
+                    const distZ = Math.abs(state.z);
+                    const isDropped = (distZ < 1.0 || distZ > 2.2 || Math.abs(state.rotX) > 0.3);
+
+                    if (isDropped) {
+                        triggerFall();
+                    } else {
+                        state.isAnimating = false;
+                        document.getElementById('status').innerText = "Status: 押し込んだ！ もう一手だ！";
+                    }
+                }
+            };
+            animateStep();
+        }
+
+        function triggerFall() {
+            state.isFallen = true;
+            document.getElementById('status').innerText = "🎉 攻略成功！ 景品GET！";
+            document.getElementById('status').style.color = "#ff3366";
+            document.getElementById('indicator-text').innerText = "✨ CLEAR ✨";
+
+            let fallProgress = 0;
+            const fallAnim = () => {
+                fallProgress += 0.05;
+                state.y = 0.6 - fallProgress * 2.5;
+                boxGroup.position.y = state.y;
+                boxGroup.rotation.x += 0.08;
+
+                if (fallProgress < 1.0) {
+                    requestAnimationFrame(fallAnim);
+                } else {
+                    boxGroup.children[0].material.opacity = 0.4;
+                    const com = boxGroup.getObjectByName("comMarker");
+                    if (com) com.visible = true; 
+                }
+            };
+            fallAnim();
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        buildStage();
+        initBox();
+        animate();
+    </script>
+</body>
+</html>
