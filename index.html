@@ -1,0 +1,46 @@
+using UnityEngine;
+
+[RequireComponent(typeof(Rigidbody))]
+public class AntiTunnelingBox : MonoBehaviour
+{
+    private Rigidbody rb;
+    
+    // スウィープテストの許容距離（これ以上動く場合は事前検知する）
+    [SerializeField] private float minimumExtent = 0.05f; 
+    
+    private Vector3 previousPosition;
+
+    void Start()
+    {
+        rb = GetComponent<Rigidbody>();
+        // 基本のCCDも有効化（ContinuousDynamicが最も精度が高い）
+        rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+        previousPosition = rb.position;
+    }
+
+    void FixedUpdate()
+    {
+        // 1フレームでの移動ベクトルを算出
+        Vector3 movementThisStep = rb.position - previousPosition;
+        float movementMagnitude = movementThisStep.magnitude;
+
+        // 移動量が設定値より大きい場合のみ、事前キャスト（SweepTest）を実行
+        if (movementMagnitude > minimumExtent)
+        {
+            RaycastHit hitInfo;
+            
+            // Rigidbodyの形状そのままに、移動方向へ衝突予測テストを飛ばす
+            // 物理演算レイヤー（例: バーのレイヤーのみ）を指定して処理を極限まで軽くする
+            if (rb.SweepTest(movementThisStep.normalized, out hitInfo, movementMagnitude))
+            {
+                // すり抜けを検知！ 衝突直前の安全な位置に箱を強制的に止める
+                rb.position = rb.position + (movementThisStep.normalized * (hitInfo.distance - 0.01f));
+                
+                // 貫通を防ぐため、その方向への速度を殺す（あるいは反発させる）
+                rb.velocity = Vector3.ProjectOnPlane(rb.velocity, hitInfo.normal);
+            }
+        }
+
+        previousPosition = rb.position;
+    }
+}
